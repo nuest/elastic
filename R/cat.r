@@ -226,27 +226,76 @@ cat_fielddata <- function(conn, verbose=FALSE, index=NULL, fields=NULL, h=NULL, 
 
 
 cat_helper <- function(conn, what='', v=FALSE, i=NULL, f=NULL, h=NULL,
-  help=FALSE, bytes=FALSE, parse=FALSE, expand_wildcards=NULL, ...) {
+  help=FALSE, bytes=FALSE, parse=FALSE, expand_wildcards=NULL, 
+  signature=FALSE, ...) {
 
   stopifnot(is.logical(v), is.logical(help), is.logical(parse),
     is.logical(bytes))
   help_or_verbose(v, help)
+  
+  action = "/_cat/"
+  
   if (!is.null(expand_wildcards)) {
     expand_wildcards <- paste0(expand_wildcards, collapse = ",")
   }
   url <- conn$make_url()
   if (!is.null(f)) f <- paste(f, collapse = ",")
-  url <- sprintf("%s/_cat/%s", url, what)
+  url <- sprintf("%s%s%s", url, action, what)
   if (!is.null(i)) url <- paste0(url, '/', i)
   args <- ec(list(v = lnull(v), help = lnull(help), fields = f,
                   h = asnull(paste0(h, collapse = ",")),
                   bytes = ifbytes(bytes),
                   expand_wildcards = asnull(expand_wildcards)))
-  cli <- crul::HttpClient$new(url = url,
-    headers = c(conn$headers), 
-    opts = c(conn$opts, ...),
-    auth = crul::auth(conn$user, conn$pwd)
-  )
+  
+  if(signature) {
+    if (! requireNamespace("aws.signature", quietly = TRUE)) {
+      splitted <- strsplit(conn$host, "\\.")[[1]]
+      service = splitted[3]
+      region = splitted[2]
+      server = splitted[1]
+      
+      hostname <- paste0(server, ".", region, ".", service, ".amazonaws.com")
+      current <- Sys.time()
+      header_timestamp <- format(current, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+      canonical_headers <- c(list(host = conn$host,
+                                  `x-amz-date` = header_timestamp),
+                             conn$headers)
+      
+      Sig <- aws.signature::signature_v4_auth(datetime = format(current, "%Y%m%dT%H%M%SZ", tz = "UTC"),
+                                              region = region,
+                                              service = service,
+                                              verb = "GET",
+                                              action = action,
+                                              query_args = c(),
+                                              canonical_headers = canonical_headers,
+                                              request_body = "",
+                                              key = conn$user,
+                                              secret = conn$pwd,
+                                              session_token = NULL,
+                                              verbose = FALSE
+      )
+      
+      headers <- c(headers,
+                   `x-amz-date` = header_timestamp,
+                   `x-amz-content-sha256` = Sig$BodyHash,
+                   # TODO: add option for session token: headers[["x-amz-security-token"]] = session_token
+                   `Authorization` = Sig[["SignatureHeader"]])
+      
+      cli <- crul::HttpClient$new(
+        url = url,
+        headers = c(conn$headers, headers),
+        opts = c(conn$opts, ...)
+      )
+    } else {
+      stop("package aws.signature required for signing, please install it first")
+    }
+  } else {
+    cli <- crul::HttpClient$new(url = url,
+                                headers = c(conn$headers), 
+                                opts = c(conn$opts, ...),
+                                auth = crul::auth(conn$user, conn$pwd)
+    )
+  }
   out <- cli$get(query = args)
   if (conn$warn) catch_warnings(out)
   if (out$status_code > 202) geterror(conn, out)
